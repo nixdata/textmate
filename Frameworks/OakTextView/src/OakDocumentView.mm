@@ -25,21 +25,13 @@ static NSString* const kFoldingsColumnIdentifier  = @"foldings";
 @interface OakDocumentView ()
 @property (nonatomic, readonly) OTVStatusBar* statusBar;
 @property (nonatomic, retain) NSColor* gutterDividerColor;
+
+@property (nonatomic, retain) NSDictionary* gutterImages;
+@property (nonatomic, retain) NSDictionary* gutterHoverImages;
+@property (nonatomic, retain) NSDictionary* gutterPressedImages;
+
 - (void)updateStyle;
 @end
-
-// ===========================================
-// = OakTextView GutterView Delegate Methods =
-// ===========================================
-
-struct retained_image_t
-{
-	retained_image_t (char const* name) : image(name ? [[NSImage imageNamed:@(name) inSameBundleAsClass:[OakTextView class]] retain] : nil) { }
-	operator NSImage* () const { return image; }
-	NSImage* image;
-};
-
-// =============================
 
 static NSString* const ObservedTextViewKeyPaths[] = { @"selectionString", @"tabSize", @"softTabs", @"freehandedEditing", @"overwriteMode", @"isMacroRecording"};
 
@@ -76,9 +68,35 @@ private:
 
 @implementation OakDocumentView
 @synthesize textView, statusBar, gutterDividerColor;
+@synthesize gutterImages, gutterHoverImages, gutterPressedImages;
 
 - (BOOL)showResizeThumb               { return statusBar.showResizeThumb; }
 - (void)setShowResizeThumb:(BOOL)flag { statusBar.showResizeThumb = flag; }
+
+- (void)resizeGutterWidth
+{
+	CGFloat height = std::max(NSHeight([textView frame]), NSHeight([textScrollView frame]));
+	CGFloat width  = NSWidth([gutterView frame]);
+	[gutterView setFrameSize:NSMakeSize(width, height)];
+
+	NSRect textViewRect = [textScrollView frame];
+	textViewRect.origin.x   = width + 1;
+	textViewRect.size.width = NSWidth([self frame]) - width - 1;
+
+	[textScrollView setFrame:textViewRect];
+	[gutterScrollView setFrameSize:NSMakeSize(width, NSHeight(textViewRect))];
+}
+
+- (void)textViewFrameDidChange:(NSNotification*)aNotification;
+{
+	[self resizeGutterWidth];
+}
+
+- (void)layoutGutterView
+{
+	[gutterView sizeToFit];
+	[self resizeGutterWidth];
+}
 
 - (id)initWithFrame:(NSRect)aRect
 {
@@ -129,6 +147,9 @@ private:
 		statusBar.autoresizingMask = NSViewWidthSizable;
 		[self addSubview:statusBar];
 
+		[self layoutGutterView];
+		[[NSNotificationCenter defaultCenter] addObserver:self selector:@selector(textViewFrameDidChange:) name:NSViewFrameDidChangeNotification object:textView];
+
 		[self setDocument:document::from_content("", "text.plain")]; // file type is only to avoid potential “no grammar” warnings in console
 
 		iterate(keyPath, ObservedTextViewKeyPaths)
@@ -137,10 +158,44 @@ private:
 	return self;
 }
 
+- (NSImage*)gutterImage:(NSString*)aName
+{
+	if(NSImage* res = [NSImage imageNamed:aName inSameBundleAsClass:[self class]])
+	{
+		CGFloat lineHeight = [gutterView.lineNumberFont pointSize];
+		CGFloat height = round(1.2 * lineHeight);
+		CGFloat width = [res size].width * height / [res size].height;
+		[res setSize:NSMakeSize(width, height)];
+		return res;
+	}
+	else
+	{
+		NSLog(@"%s unable to load image %@", sel_getName(_cmd), aName);
+	}
+	return nil;
+}
+
 - (void)setFont:(NSFont*)newFont
 {
 	textView.font = newFont;
 	gutterView.lineNumberFont = [NSFont fontWithName:[newFont fontName] size:round(0.8 * [newFont pointSize])];
+
+	self.gutterImages = @{
+		kBookmarksColumnIdentifier : @[ [NSNull null], [self gutterImage:@"Bookmark Template"], [self gutterImage:@"Search Mark Template"] ],
+		kFoldingsColumnIdentifier  : @[ [NSNull null], [self gutterImage:@"Folding Top Template"], [self gutterImage:@"Folding Collapsed Template"], [self gutterImage:@"Folding Bottom Template"] ],
+	};
+
+	self.gutterHoverImages = @{
+		kBookmarksColumnIdentifier : @[ [self gutterImage:@"Bookmark Hover Add Template"], [self gutterImage:@"Bookmark Hover Remove Template"], [self gutterImage:@"Bookmark Hover Add Template"] ],
+		kFoldingsColumnIdentifier  : @[ [NSNull null], [self gutterImage:@"Folding Top Hover Template"], [self gutterImage:@"Folding Collapsed Hover Template"], [self gutterImage:@"Folding Bottom Hover Template"] ],
+	};
+
+	self.gutterPressedImages = @{
+		kBookmarksColumnIdentifier : @[ [self gutterImage:@"Bookmark Pressed Template"], [self gutterImage:@"Bookmark Pressed Template"], [self gutterImage:@"Bookmark Pressed Template"] ],
+		kFoldingsColumnIdentifier  : @[ [NSNull null], [self gutterImage:@"Folding Top Pressed Template"], [self gutterImage:@"Folding Collapsed Pressed Template"], [self gutterImage:@"Folding Bottom Pressed Template"] ],
+	};
+
+	[self layoutGutterView];
 }
 
 - (IBAction)makeTextLarger:(id)sender       { [self setFont:[NSFont fontWithName:[textView.font fontName] size:[textView.font pointSize] + 1]]; }
@@ -203,6 +258,9 @@ private:
 	[gutterScrollView release];
 	[gutterView release];
 	[gutterDividerColor release];
+	[gutterImages release];
+	[gutterHoverImages release];
+	[gutterPressedImages release];
 	[textScrollView release];
 	[textView release];
 	[statusBar release];
@@ -283,6 +341,7 @@ private:
 	D(DBF_OakDocumentView, bug("show line numbers %s\n", BSTR([[gutterScrollView documentView] visibilityForColumnWithIdentifier:GVLineNumbersColumnIdentifier])););
 	BOOL isVisibleFlag = ![[gutterScrollView documentView] visibilityForColumnWithIdentifier:GVLineNumbersColumnIdentifier];
 	[[gutterScrollView documentView] setVisibility:isVisibleFlag forColumnWithIdentifier:GVLineNumbersColumnIdentifier];
+	[self layoutGutterView];
 
 	if(isVisibleFlag)
 			[[NSUserDefaults standardUserDefaults] removeObjectForKey:@"DocumentView Disable Line Numbers"];
@@ -652,47 +711,20 @@ static std::string const kBookmarkType = "bookmark";
 
 - (NSImage*)imageForState:(NSUInteger)state forColumnWithIdentifier:(id)identifier
 {
-	if([identifier isEqualToString:kBookmarksColumnIdentifier])
-	{
-		static retained_image_t images[] = { NULL, "Bookmark Template", "Search Mark Template" };
-		return state < sizeofA(images) ? images[state] : nil;
-	}
-	else if([identifier isEqualToString:kFoldingsColumnIdentifier])
-	{
-		static retained_image_t images[] = { NULL, "Folding Top Template", "Folding Collapsed Template", "Folding Bottom Template" };
-		return state < sizeofA(images) ? images[state] : nil;
-	}
-	return nil;
+	NSArray* array = gutterImages[identifier];
+	return array && state < [array count] && array[state] != [NSNull null] ? array[state] : nil;
 }
 
 - (NSImage*)hoverImageForState:(NSUInteger)state forColumnWithIdentifier:(id)identifier
 {
-	if([identifier isEqualToString:kBookmarksColumnIdentifier])
-	{
-		static retained_image_t images[] = { "Bookmark Hover Add Template", "Bookmark Hover Remove Template", "Bookmark Hover Add Template" };
-		return state < sizeofA(images) ? images[state] : nil;
-	}
-	else if([identifier isEqualToString:kFoldingsColumnIdentifier])
-	{
-		static retained_image_t images[] = { NULL, "Folding Top Hover Template", "Folding Collapsed Hover Template", "Folding Bottom Hover Template" };
-		return state < sizeofA(images) ? images[state] : nil;
-	}
-	return nil;
+	NSArray* array = gutterHoverImages[identifier];
+	return array && state < [array count] && array[state] != [NSNull null] ? array[state] : nil;
 }
 
 - (NSImage*)pressedImageForState:(NSUInteger)state forColumnWithIdentifier:(id)identifier
 {
-	if([identifier isEqualToString:kBookmarksColumnIdentifier])
-	{
-		static retained_image_t images[] = { "Bookmark Pressed Template", "Bookmark Pressed Template", "Bookmark Pressed Template" };
-		return state < sizeofA(images) ? images[state] : nil;
-	}
-	else if([identifier isEqualToString:kFoldingsColumnIdentifier])
-	{
-		static retained_image_t images[] = { NULL, "Folding Top Pressed Template", "Folding Collapsed Pressed Template", "Folding Bottom Pressed Template" };
-		return state < sizeofA(images) ? images[state] : nil;
-	}
-	return nil;
+	NSArray* array = gutterPressedImages[identifier];
+	return array && state < [array count] && array[state] != [NSNull null] ? array[state] : nil;
 }
 
 // =============================
